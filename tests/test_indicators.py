@@ -89,3 +89,13 @@ def test_overfit_regions_no_overlap_when_train_val_both_fall():
     train = [10, 9, 8, 7]
     val = [10, 9, 8, 7]
     assert overfit_regions(train, val, min_consecutive=3) == []
+
+
+def test_overfit_regions_mid_series_flush_then_resets():
+    # A qualifying run that ends *before* the series does (train stops falling
+    # at index 4) must be flushed via the loop's else-branch, not only via the
+    # after-loop flush that a run reaching the last index would exercise.
+    train = [10, 9, 8, 7, 9, 9, 9]
+    val = [5, 6, 7, 8, 8, 8, 8]
+    regions = overfit_regions(train, val, min_consecutive=3)
+    assert regions == [(1, 3)]

@@ -64,3 +64,27 @@ def test_rate_cut_ignores_small_decay():
 def test_rate_cut_ignores_increase():
     candles = _candles([0.05, 0.10], window=1)
     assert detect_rate_cuts(candles, min_drop_frac=0.10) == []
+
+
+def test_flash_crash_exact_threshold_not_flagged():
+    # change == threshold exactly must NOT fire: detect_flash_crashes uses a
+    # strict `>`, not `>=`. Values chosen as exact powers of two so the ratio
+    # lands precisely on 0.25 in IEEE754, not just approximately.
+    candles = _candles([4.0, 5.0], window=1)
+    assert detect_flash_crashes(candles, threshold=0.25) == []
+
+
+def test_flash_crash_zero_prev_close_does_not_raise():
+    candles = _candles([0.0, 5.0], window=1)
+    assert detect_flash_crashes(candles, threshold=0.30) == []
+
+
+def test_rate_cut_exact_threshold_not_flagged():
+    # Same exact-boundary reasoning as the flash-crash case above.
+    candles = _candles([4.0, 3.0], window=1)
+    assert detect_rate_cuts(candles, min_drop_frac=0.25) == []
+
+
+def test_rate_cut_zero_prev_close_does_not_raise():
+    candles = _candles([0.0, -1.0], window=1)
+    assert detect_rate_cuts(candles, min_drop_frac=0.10) == []

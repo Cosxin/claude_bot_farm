@@ -62,6 +62,8 @@ const RATE_CUT_COLOR = "#7c4dff";
 const OVERFIT_COLOR = "#c99a06";
 const SMA_PALETTE = ["#1f77b4", "#2ca02c", "#9467bd", "#17becf"];
 const EMA_PALETTE = ["#ff7f0e", "#d62728", "#8c564b", "#e377c2"];
+const BOLLINGER_WINDOW = 20;
+const BOLLINGER_NUM_STD = 2;
 
 function el<K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -104,14 +106,53 @@ function guessVolumeTag(tags: string[]): string | null {
   return null;
 }
 
+// Set whenever a fetch fails for a reason other than "no data for this tag yet"
+// (a plain 404 from our own backend), so callers can tell a real failure apart
+// from a benign empty result and say so instead of showing a misleading
+// "no data yet" message. Cleared at the start of each refresh() call.
+let lastFetchError: string | null = null;
+
 async function fetchJson<T>(url: string): Promise<T | null> {
+  let res: Response;
   try {
-    const res = await fetch(url);
-    if (!res.ok) return null;
-    return (await res.json()) as T;
-  } catch {
+    res = await fetch(url);
+  } catch (e) {
+    lastFetchError = `network error (${e})`;
     return null;
   }
+  if (res.status === 404) return null; // no data for this run/tag yet -- not an error
+  if (!res.ok) {
+    lastFetchError = `server returned HTTP ${res.status}`;
+    return null;
+  }
+  try {
+    return (await res.json()) as T;
+  } catch (e) {
+    lastFetchError = `invalid response (${e})`;
+    return null;
+  }
+}
+
+type TbTheme = "light" | "dark";
+
+function getTbTheme(): TbTheme {
+  // TensorBoard's theme toggle (light / dark / browser default) writes an
+  // explicit choice to localStorage["_tb_global_settings"]; since the plugin
+  // iframe is same-origin with the TensorBoard shell, it shares that storage
+  // directly (verified: reading it here returns the exact value the parent
+  // page set). Only fall back to the OS-level media query -- which does NOT
+  // reflect an explicit in-app choice -- when TB itself is on "browser default".
+  try {
+    const raw = window.localStorage.getItem("_tb_global_settings");
+    if (raw) {
+      const parsed = JSON.parse(raw) as { theme?: string };
+      if (parsed.theme === "dark") return "dark";
+      if (parsed.theme === "light") return "light";
+    }
+  } catch {
+    // fall through to media-query default
+  }
+  return window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
 function sma(values: (number | null)[], window: number): (number | null)[] {
@@ -174,6 +215,7 @@ function parseWindowList(raw: string): number[] {
 
 class CandlesApp {
   private root: HTMLElement;
+  private appDiv: HTMLElement | null = null;
   private chartContainer: HTMLElement;
   private statusEl: HTMLElement;
   private chart: IChartApi | null = null;
@@ -192,6 +234,11 @@ class CandlesApp {
 
   private tagsData: TagsResponse = { runs: {}, config: {} };
   private pollHandle: number | null = null;
+  private isDark = getTbTheme() === "dark";
+  // Bumped at the start of every refresh(); a still-in-flight call whose
+  // generation no longer matches the latest one discards its results instead
+  // of overwriting whatever a newer, faster call already rendered.
+  private requestGeneration = 0;
 
   constructor(root: HTMLElement) {
     this.root = root;
@@ -209,48 +256,69 @@ class CandlesApp {
   }
 
   private buildLayout(): void {
-    const controls = el("div", { class: "lc-controls" }, [
-      this.labeled("Run", this.runSelect),
-      this.labeled("Tag", this.tagSelect),
-      this.labeled("Window", this.windowInput),
-      this.labeled("SMA", this.smaInput),
-      this.labeled("EMA", this.emaInput),
+    const toggles = el("div", { class: "lc-toggles" }, [
       this.checkboxLabel("Bollinger", this.bollingerCheck),
       this.checkboxLabel("Overfit index", this.overfitCheck),
       this.checkboxLabel("Wall Street mode", this.wallStreetCheck),
       this.checkboxLabel("Live (30s)", this.liveCheck),
       this.refreshButton,
     ]);
+    const controls = el("div", { class: "lc-controls" }, [
+      this.labeled("Run", this.runSelect),
+      this.labeled("Tag", this.tagSelect),
+      this.labeled("Window", this.windowInput),
+      this.labeled("SMA", this.smaInput),
+      this.labeled("EMA", this.emaInput),
+      toggles,
+    ]);
 
     const style = el("style", {}, [
       `
-      .lc-app { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 12px; color: #1a1a1a; }
+      .lc-app { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; padding: 12px; color: #1a1a1a; background: #ffffff; }
       .lc-app h2 { margin: 0 0 10px 0; font-size: 16px; }
       .lc-controls { display: flex; flex-wrap: wrap; gap: 14px; align-items: end; margin-bottom: 10px; font-size: 13px; }
       .lc-controls label { display: flex; flex-direction: column; gap: 2px; font-size: 11px; color: #555; }
       .lc-controls input[type=number], .lc-controls input[type=text] { width: 5.5em; }
-      .lc-controls .lc-checkbox { flex-direction: row; align-items: center; gap: 4px; }
+      .lc-toggles { display: flex; flex-wrap: wrap; align-items: center; gap: 14px; margin-left: auto; }
+      .lc-toggles .lc-checkbox { flex-direction: row; align-items: center; gap: 4px; }
       .lc-status { font-size: 12px; color: #888; margin-bottom: 6px; min-height: 1.2em; }
+      .lc-status.lc-status-error { color: #b3261e; }
       .lc-chart { border: 1px solid #e0e0e0; border-radius: 4px; }
       button { cursor: pointer; }
+
+      .lc-app.lc-dark { color: #d4d4d4; background: #303030; }
+      .lc-app.lc-dark .lc-controls label { color: #aaaaaa; }
+      .lc-app.lc-dark .lc-status { color: #999999; }
+      .lc-app.lc-dark .lc-status.lc-status-error { color: #ff8a80; }
+      .lc-app.lc-dark .lc-chart { border-color: #4a4a4a; }
+      .lc-app.lc-dark select, .lc-app.lc-dark input, .lc-app.lc-dark button {
+        background: #3c3c3c; color: #d4d4d4; border: 1px solid #565656;
+      }
+
+      @media (max-width: 960px) {
+        .lc-controls { gap: 10px; }
+        .lc-toggles { margin-left: 0; gap: 10px; }
+      }
       `,
     ]);
 
-    this.root.append(
-      style,
-      el("div", { class: "lc-app" }, [
-        el("h2", {}, ["\u{1F56F}\u{FE0F} losscandles — loss curves and loss curves are different graphs. For now."]),
-        controls,
-        this.statusEl,
-        this.chartContainer,
-      ])
-    );
+    const appDiv = el("div", { class: this.isDark ? "lc-app lc-dark" : "lc-app" }, [
+      el("h2", {}, ["\u{1F56F}\u{FE0F} losscandles — loss curves and loss curves are different graphs. For now."]),
+      controls,
+      this.statusEl,
+      this.chartContainer,
+    ]);
+    this.appDiv = appDiv;
+    this.root.append(style, appDiv);
 
     this.runSelect.addEventListener("change", () => this.onRunChange());
     for (const control of [this.tagSelect, this.windowInput, this.smaInput, this.emaInput, this.bollingerCheck, this.overfitCheck, this.wallStreetCheck]) {
       control.addEventListener("change", () => this.refresh());
     }
     this.refreshButton.addEventListener("click", () => this.refresh());
+    window.addEventListener("storage", (e) => {
+      if (e.key === "_tb_global_settings") this.applyTheme();
+    });
     this.liveCheck.addEventListener("change", () => this.togglePolling());
   }
 
@@ -291,20 +359,37 @@ class CandlesApp {
     }
   }
 
+  private applyTheme(): void {
+    const wasDark = this.isDark;
+    this.isDark = getTbTheme() === "dark";
+    if (this.isDark === wasDark) return;
+    this.appDiv?.classList.toggle("lc-dark", this.isDark);
+    if (this.chart) this.refresh(); // re-render so chart colors pick up the new theme
+  }
+
+  private setStatus(text: string, isError = false): void {
+    this.statusEl.textContent = text;
+    this.statusEl.classList.toggle("lc-status-error", isError);
+  }
+
   private async refresh(): Promise<void> {
+    const myGeneration = ++this.requestGeneration;
+
     const run = this.runSelect.value;
     const tag = this.tagSelect.value;
     if (!run || !tag) {
-      this.statusEl.textContent = "No scalar data found in this logdir yet.";
+      this.setStatus("No scalar data found in this logdir yet.");
       return;
     }
-    const windowSize = Math.max(1, parseInt(this.windowInput.value, 10) || 100);
+    const parsedWindow = parseInt(this.windowInput.value, 10);
+    const windowSize = Number.isFinite(parsedWindow) ? Math.max(1, parsedWindow) : 100;
     const tags = this.tagsData.runs[run] ?? [];
     const valTag = this.overfitCheck.checked ? guessValTag(tag, tags) : null;
     const lrTag = guessLrTag(tags);
     const volumeTag = this.tagsData.config[run]?.volume_tag ?? guessVolumeTag(tags);
 
-    this.statusEl.textContent = "Loading…";
+    this.setStatus("Loading…");
+    lastFetchError = null;
 
     const ohlcParams = new URLSearchParams({ run, tag, window: String(windowSize) });
     if (volumeTag) ohlcParams.set("volume_tag", volumeTag);
@@ -320,18 +405,45 @@ class CandlesApp {
         : Promise.resolve(null),
     ]);
 
+    // A newer refresh() started (and possibly already finished) while this one
+    // was in flight -- whatever it rendered is what the controls now reflect,
+    // so let it win and drop these now-stale results on the floor.
+    if (myGeneration !== this.requestGeneration) return;
+
     if (!ohlc || ohlc.candles.length === 0) {
-      this.statusEl.textContent = `No data yet for run=${run} tag=${tag}.`;
+      this.setStatus(
+        lastFetchError ? `Error loading data: ${lastFetchError}` : `No data yet for run=${run} tag=${tag}.`,
+        lastFetchError !== null
+      );
       return;
     }
+
+    const insufficientNote = this.describeInsufficientLookbacks(ohlc.candles.length);
     const last = ohlc.candles[ohlc.candles.length - 1];
-    this.statusEl.textContent =
+    this.setStatus(
       `${ohlc.candles.length} candles · steps ${ohlc.candles[0].step_start}–${last.step_end}` +
-      (valTag ? ` · val: ${valTag}` : "") +
-      (lrTag ? ` · lr: ${lrTag}` : "") +
-      (volumeTag ? ` · volume: ${volumeTag}` : " · volume: point count");
+        (valTag ? ` · val: ${valTag}` : "") +
+        (lrTag ? ` · lr: ${lrTag}` : "") +
+        (volumeTag ? ` · volume: ${volumeTag}` : " · volume: point count") +
+        (lastFetchError ? ` · warning: ${lastFetchError} for part of this request` : "") +
+        (insufficientNote ? ` · ${insufficientNote}` : ""),
+      lastFetchError !== null
+    );
 
     this.render(ohlc.candles, annotations, valTag ? valOhlc?.candles ?? null : null, windowSize);
+  }
+
+  private describeInsufficientLookbacks(candleCount: number): string | null {
+    const short: string[] = [];
+    for (const w of parseWindowList(this.smaInput.value)) {
+      if (w > candleCount) short.push(`SMA(${w})`);
+    }
+    for (const w of parseWindowList(this.emaInput.value)) {
+      if (w > candleCount) short.push(`EMA(${w})`);
+    }
+    if (this.bollingerCheck.checked && BOLLINGER_WINDOW > candleCount) short.push("Bollinger");
+    if (short.length === 0) return null;
+    return `${short.join(", ")} need${short.length === 1 ? "s" : ""} more candles than this window has (${candleCount}) and won't be drawn`;
   }
 
   private render(candles: Candle[], annotations: AnnotationsResponse | null, valCandles: Candle[] | null, windowSize: number): void {
@@ -349,7 +461,12 @@ class CandlesApp {
     const chart = createChart(this.chartContainer, {
       width: this.chartContainer.clientWidth || 900,
       height: totalHeight,
-      layout: { textColor: "#333", background: { color: "white" } },
+      layout: this.isDark
+        ? { textColor: "#d4d4d4", background: { color: "#303030" }, panes: { separatorColor: "#4a4a4a" } }
+        : { textColor: "#333", background: { color: "white" } },
+      grid: this.isDark
+        ? { vertLines: { color: "#3f3f3f" }, horzLines: { color: "#3f3f3f" } }
+        : undefined,
       timeScale: { tickMarkFormatter: (time: Time) => String(time), borderVisible: true },
       localization: { timeFormatter: (time: Time) => `step ${time}` },
     });
@@ -427,7 +544,7 @@ class CandlesApp {
       series.setData(toLineData(times, ema(closes, w)));
     });
     if (this.bollingerCheck.checked) {
-      const { mid, upper, lower } = bollinger(closes, 20, 2);
+      const { mid, upper, lower } = bollinger(closes, BOLLINGER_WINDOW, BOLLINGER_NUM_STD);
       const dim = { lineWidth: 1 as const, color: "rgba(120,120,120,0.55)" };
       chart.addSeries(LineSeries, { ...dim, title: "Bollinger mid" }, pane).setData(toLineData(times, mid));
       chart.addSeries(LineSeries, { ...dim, title: "Bollinger upper" }, pane).setData(toLineData(times, upper));
@@ -483,7 +600,10 @@ class CandlesApp {
       markers.push({ time: a.step as unknown as UTCTimestamp, position: "belowBar", color: RATE_CUT_COLOR, shape: "circle", size: 0, text: "CUT" });
     }
     for (const step of annotations.epoch_boundaries) {
-      markers.push({ time: step as unknown as UTCTimestamp, position: "inBar", color: "#999999", shape: "square", text: "" });
+      // size: 0 + a small text glyph (not "inBar") so this never covers the
+      // candle body it's marking -- a filled inBar shape at normal size fully
+      // hides thin/flat candles, which is exactly the data it's meant to call out.
+      markers.push({ time: step as unknown as UTCTimestamp, position: "belowBar", color: "#999999", shape: "circle", size: 0, text: "·" });
     }
     markers.sort((a, b) => (a.time as unknown as number) - (b.time as unknown as number));
     createSeriesMarkers(series, markers);

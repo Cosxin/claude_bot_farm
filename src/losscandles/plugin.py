@@ -10,6 +10,7 @@ own plugin_name, written by `losscandles.torch.LossCandlesWriter`.
 from __future__ import annotations
 
 import json
+import math
 import os
 
 import werkzeug
@@ -27,9 +28,13 @@ from losscandles.indicators import overfit_regions as compute_overfit_regions
 from losscandles.ohlc import aggregate_ohlc, align_candles
 
 SCALARS_PLUGIN_NAME = "scalars"
-# data_provider downsamples by default; candle math needs real resolution, not a
-# sparse sample, so we request a generously high cap rather than TB's default 1000.
-# Runs logging more than this many points for a single tag will still be downsampled.
+# read_scalars(downsample=...) only limits how much of what TensorBoard's own
+# ingestion already retained gets returned to us -- it cannot recover points
+# TensorBoard dropped at ingestion time. That earlier, much lower cap (~1000
+# points per tag by default) is set by the `tensorboard` CLI's own
+# --samples_per_plugin flag, outside this plugin's control; see the README's
+# "Order book depth" section. We still pass a generous value here so we never
+# add our own additional truncation on top of whatever survived ingestion.
 _DOWNSAMPLE_CAP = 1_000_000
 
 
@@ -145,8 +150,8 @@ class LossCandlesPlugin(base_plugin.TBPlugin):
         window = _positive_int(request.args.get("window", "100"), "window")
         lr_tag = request.args.get("lr_tag") or None
         val_tag = request.args.get("val_tag") or None
-        flash_crash_threshold = float(request.args.get("flash_crash_threshold", 0.30))
-        rate_cut_threshold = float(request.args.get("rate_cut_threshold", 0.10))
+        flash_crash_threshold = _positive_float(request.args.get("flash_crash_threshold", "0.30"), "flash_crash_threshold")
+        rate_cut_threshold = _positive_float(request.args.get("rate_cut_threshold", "0.10"), "rate_cut_threshold")
         min_consecutive = _positive_int(request.args.get("min_consecutive", "3"), "min_consecutive")
 
         ctx = plugin_util.context(request.environ)
@@ -207,6 +212,13 @@ class LossCandlesPlugin(base_plugin.TBPlugin):
         return werkzeug.Response(json.dumps(body), content_type="application/json")
 
     def _epoch_boundaries(self, ctx, experiment, run):
+        # Zero-instrumentation detection: scans the "epoch" scalar tag for value
+        # transitions. Reported steps are only exact if TensorBoard retained every
+        # point for that tag (see the _DOWNSAMPLE_CAP note above) -- on a run that
+        # exceeds TB's own ingestion cap, a transition is reported at the next
+        # *surviving* sample after the true boundary, not the boundary itself.
+        # add_epoch_boundary() markers (below) are exact regardless, since those
+        # are few enough to never hit that cap in practice.
         boundaries = set()
         epoch_series = self._read_series(ctx, experiment, run, "epoch")
         if epoch_series:
@@ -228,6 +240,16 @@ def _positive_int(raw: str, name: str) -> int:
         raise werkzeug.exceptions.BadRequest(f"{name} must be an integer, got {raw!r}")
     if value < 1:
         raise werkzeug.exceptions.BadRequest(f"{name} must be >= 1, got {value}")
+    return value
+
+
+def _positive_float(raw, name: str) -> float:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        raise werkzeug.exceptions.BadRequest(f"{name} must be a number, got {raw!r}")
+    if not math.isfinite(value) or value <= 0:
+        raise werkzeug.exceptions.BadRequest(f"{name} must be a finite number > 0, got {raw!r}")
     return value
 
 

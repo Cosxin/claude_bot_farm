@@ -40,3 +40,25 @@ def data_provider(demo_logdir):
 def plugin(data_provider, demo_logdir):
     context = base_plugin.TBContext(data_provider=data_provider, logdir=demo_logdir)
     return LossCandlesPlugin(context)
+
+
+@pytest.fixture
+def make_plugin():
+    """Factory for a LossCandlesPlugin bound to a caller-supplied logdir, so tests
+    can write exactly the scalar data an edge case needs instead of relying on
+    the shared session-scoped demo run.
+    """
+
+    def _make(logdir: str) -> LossCandlesPlugin:
+        tensor_size_guidance = dict(di.DEFAULT_TENSOR_SIZE_GUIDANCE)
+        multiplexer = plugin_event_multiplexer.EventMultiplexer(
+            size_guidance=di.DEFAULT_SIZE_GUIDANCE,
+            tensor_size_guidance=tensor_size_guidance,
+        )
+        multiplexer.AddRunsFromDirectory(logdir)
+        multiplexer.Reload()
+        dp = event_data_provider.MultiplexerDataProvider(multiplexer, logdir)
+        context = base_plugin.TBContext(data_provider=dp, logdir=logdir)
+        return LossCandlesPlugin(context)
+
+    return _make

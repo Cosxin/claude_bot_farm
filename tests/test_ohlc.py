@@ -192,3 +192,15 @@ def test_align_candles_skips_unmatched_windows():
     a = aggregate_ohlc([0, 50], [1.0, 2.0], window=50)
     b = aggregate_ohlc([500, 550], [3.0, 4.0], window=50)
     assert align_candles(a, b, window=50) == []
+
+
+def test_align_candles_partial_overlap():
+    # a covers window_ids {0, 1, 2}, b covers {1, 2, 3} -- only 1 and 2 overlap,
+    # so each side has a dangling window that must be dropped, not just the
+    # fully-disjoint case already covered above.
+    a = aggregate_ohlc([0, 50, 100], [1.0, 2.0, 3.0], window=50)
+    b = aggregate_ohlc([50, 100, 150], [10.0, 20.0, 30.0], window=50)
+    pairs = align_candles(a, b, window=50)
+    assert [ca.start_step for ca, _ in pairs] == [50, 100]
+    assert [cb.start_step for _, cb in pairs] == [50, 100]
+    assert [cb.close for _, cb in pairs] == [10.0, 20.0]
