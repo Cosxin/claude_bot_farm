@@ -1,0 +1,17 @@
+{
+  "name": "losscandles-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TensorBoard dynamic plugin frontend for losscandles (candlestick loss charts).",
+  "scripts": {
+    "build": "node build.mjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "lightweight-charts": "5.2.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1",
+    "typescript": "6.0.3"
+  }
+}
