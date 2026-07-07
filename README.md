@@ -13,7 +13,7 @@ trade.
 ![bubble](https://img.shields.io/badge/bubble-priced%20in-blueviolet)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 
-![losscandles Candles tab in TensorBoard, showing a real training run's candlestick chart with an SMA overlay, an overfit-index pane with two detected OVERFITTING regions, SELL signal markers, and a RATE CUT marker](docs/screenshot.png)
+![losscandles Candles tab in TensorBoard, showing a real training run's candlestick chart with an SMA overlay, a RATE CUT marker, and an overfit-index pane with three detected OVERFITTING regions](docs/screenshot.png)
 
 ---
 
@@ -27,14 +27,29 @@ An entire industry feeds candlestick charts *into* neural networks to predict
 markets. **Nobody has fed the neural network back out into a candlestick
 chart.** The arbitrage was wide open. We took the trade.
 
-This is not a workaround, a logging-charts-as-images hack, or an offline
-HTML export. It's a real dynamic TensorBoard plugin with its own "Candles" tab,
-reading your scalars live through TensorBoard's own data provider.
+This is not a workaround, a logging-charts-as-images hack, or an offline HTML
+file cosplaying as a webapp. It's a real dynamic TensorBoard plugin with its
+own "Candles" tab, reading your scalars live through TensorBoard's own data
+provider — the exact plumbing SCALARS and TIME SERIES use. We just gave it a
+Bloomberg terminal instead of a blue line.
 
-## Install
+## Install (local build — we're not listed on any exchange)
+
+There is no `pip install losscandles`. This ticker doesn't trade anywhere
+public, which is either an anti-rug-pull guarantee or a red flag depending on
+your priors:
 
 ```bash
-pip install losscandles
+git clone https://github.com/Cosxin/losscandles.git
+cd losscandles
+pip install .
+```
+
+Want the drop-in `torch` writer (epoch gridlines, a declared volume tag,
+halt-on-NaN)?
+
+```bash
+pip install ".[torch]"
 ```
 
 *Past performance of this model does not guarantee convergence. Not financial
@@ -43,7 +58,7 @@ advice.*
 ## Quickstart
 
 **Zero-instrumentation** — point it at any logdir written by plain
-`SummaryWriter.add_scalar`, no code changes required:
+`SummaryWriter.add_scalar`. No code changes, no SDK key, no seed round:
 
 ```bash
 python -m losscandles.demo        # generates a synthetic run under runs/demo
@@ -54,7 +69,8 @@ Longer real runs may want a higher TensorBoard sampling cap — see
 [Order book depth](#order-book-depth-aka-sampling) below.
 
 **Drop-in writer** — change one import, keep your training loop, and unlock
-epoch gridlines / a declared volume tag / halt-on-NaN:
+epoch gridlines, a declared volume tag, and a big red HALT button for the day
+your loss discovers NaN:
 
 ```python
 from losscandles.torch import LossCandlesWriter as SummaryWriter
@@ -78,7 +94,7 @@ always wins if you've called it.
 
 `torch` is only required for `losscandles.torch` — the plugin itself has no
 torch dependency and works with any framework that writes standard
-TensorBoard scalar summaries.
+TensorBoard scalar summaries: PyTorch, JAX, Keras, or a `for` loop and a dream.
 
 ## Reading the chart
 
@@ -108,16 +124,16 @@ no `losscandles.torch` required.
 
 ## Order book depth (a.k.a. sampling)
 
-TensorBoard caps scalar ingestion at ~1000 points per tag by default, which
-can quietly truncate candles on long runs. For full-resolution charts on
-larger runs:
+TensorBoard's own market makers cap scalar ingestion at ~1000 points per tag
+by default, which can quietly truncate candles on long runs — thin liquidity,
+wide spreads, missing candles. For full-resolution charts on larger runs:
 
 ```bash
 tensorboard --logdir runs --samples_per_plugin scalars=100000
 ```
 
 The bundled demo run is sized to stay under the default cap, so `tensorboard
---logdir runs` alone is enough to see it at full resolution.
+--logdir runs` alone is enough to see it at full depth.
 
 ## Backward compatibility (since the 2000s)
 
@@ -159,13 +175,17 @@ Trading halts. A black marker goes up on the chart. A moment of silence is
 observed. Restart from checkpoint like the Fed restarts liquidity: quietly,
 and pretending it was the plan.
 
-## Development
+## Development (for masochists who want to help)
 
 ```bash
 pip install -e ".[dev,torch]"
 pytest                                          # unit + WSGI route + entry-point tests
 cd frontend && npm install && npm run build     # rebuild static/index.js after editing src/index.ts
 ```
+
+Pull requests are welcome and will be reviewed with exactly the rigor you'd
+expect for a candlestick chart of a number that only goes down. Bug fixes and
+joke improvements are weighted equally.
 
 ## Roadmap
 
